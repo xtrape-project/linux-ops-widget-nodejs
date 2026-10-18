@@ -1,0 +1,119 @@
+name: Public source candidate
+# Install through reviewed public-repository PRs after the source snapshot exists.
+# Candidates need independent integration acceptance before version-tag promotion.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed public source commit
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: public-candidate
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: ${{ github.repository_owner == 'xtrape-project' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 30
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify public source and run product gates without private credentials
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          corepack enable
+          # Fallback for frozen sources without packageManager; Corepack still
+          # honors an explicit packageManager in the checked-out source.
+          corepack prepare pnpm@10.28.2 --activate
+          pnpm install --frozen-lockfile
+          for gate in lint typecheck build test; do
+            if node -e 'process.exit(JSON.parse(require("fs").readFileSync("package.json")).scripts?.[process.argv[1]] ? 0 : 1)' "$gate"; then
+              pnpm "$gate"
+            fi
+          done
+  build:
+    needs: validate
+    if: ${{ github.repository_owner == 'xtrape-project' && github.ref == 'refs/heads/main' }}
+    runs-on: dind
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build public source once without private build credentials
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          case "$GITHUB_REPOSITORY" in
+            xtrape-project/xtrape-platform-ce|xtrape-project/xtrape-panel-ce|xtrape-project/xtrape-exposure|xtrape-project/linux-ops-widget-nodejs|xtrape-project/forgejo-ops-widget-nodejs) ;;
+            *) echo 'unsupported public runtime repository' >&2; exit 1;;
+          esac
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          VERSION="$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          IMAGE="forgejo.xtrape.com/$GITHUB_REPOSITORY:candidate-$SOURCE_SHA-$GITHUB_RUN_ID"
+          BUILD_TIME="$(git show -s --format=%cI HEAD)"
+          args=()
+          case "$GITHUB_REPOSITORY" in
+            */xtrape-platform-ce) args+=(--build-arg "SERVER_CE_VERSION=$VERSION" --build-arg "SERVER_CE_COMMIT=$SOURCE_SHA" --build-arg "SERVER_CE_BUILD_TIME=$BUILD_TIME");;
+            */xtrape-panel-ce) args+=(-f deploy/docker/Dockerfile --build-arg "VITE_PANEL_VERSION=$VERSION" --build-arg "PANEL_VERSION=$VERSION" --build-arg "PANEL_COMMIT=$SOURCE_SHA" --build-arg "PANEL_BUILD_TIME=$BUILD_TIME");;
+          esac
+          docker buildx build --platform linux/amd64 --load "${args[@]}" \
+            --label "org.opencontainers.image.source=https://forgejo.xtrape.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" -t "$IMAGE" .
+          echo "PUBLIC_CANDIDATE_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Publish candidate in this public organization and verify anonymous pull
+        env:
+          REGISTRY_USER: ${{ vars.REGISTRY_USER || secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$REGISTRY_USER" && test -n "$REGISTRY_TOKEN"
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | docker login forgejo.xtrape.com -u "$REGISTRY_USER" --password-stdin
+          # A workflow retry cannot silently replace an earlier candidate at this coordinate.
+          # A pre-existing or unreadable coordinate requires reconciliation, never overwrite.
+          # Use a run-attempt-specific locator so a retry yields a distinct candidate.
+          ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+          [[ "$ATTEMPT" =~ ^[0-9]+$ ]]
+          TARGET="$PUBLIC_CANDIDATE_IMAGE-attempt-$ATTEMPT"
+          if docker buildx imagetools inspect "$TARGET" > "$DOCKER_CONFIG/existing" 2> "$DOCKER_CONFIG/read-error"; then
+            echo 'candidate coordinate already exists; reconcile before another publication' >&2
+            exit 1
+          fi
+          if grep -Eqi 'unauthorized|forbidden|denied|authentication|timeout|tls|certificate|connection|(^|[^0-9])(401|403|429|5[0-9][0-9])([^0-9]|$)' "$DOCKER_CONFIG/read-error"; then
+            echo 'candidate registry read refused; no write attempted' >&2
+            exit 1
+          fi
+          grep -Eqi 'manifest unknown|MANIFEST_UNKNOWN' "$DOCKER_CONFIG/read-error" || {
+            echo 'candidate absence not proven; no write attempted' >&2; exit 1;
+          }
+          docker tag "$PUBLIC_CANDIDATE_IMAGE" "$TARGET"
+          docker push "$TARGET"
+          DIGEST="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          rm -f "$DOCKER_CONFIG/config.json"
+          unset REGISTRY_USER REGISTRY_TOKEN
+          docker pull "${TARGET%:*}@$DIGEST"
+          printf 'PUBLIC_CANDIDATE=%s@%s\n' "$TARGET" "$DIGEST"
