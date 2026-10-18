@@ -1,0 +1,137 @@
+name: Build candidate
+
+# Produces a Build Candidate: ONE image built from ONE commit already merged
+# into main, pushed to exactly ONE internal coordinate:
+#
+#   forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:candidate-<source-sha>
+#
+# A candidate is NOT a release and never claims one:
+#   - it carries no version coordinate, so it can never be mistaken for, or
+#     silently promoted into, a published version;
+#   - it is distributed to the internal registry only — no xtrape-project leg,
+#     no public registry credential is used or required by this workflow.
+#
+# The candidate's canonical identity is the DIGEST-QUALIFIED artifact
+#
+#   forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:candidate-<source-sha>@sha256:<digest>
+#
+# NOT the tag. What the gate does and does not guarantee (reviews 3409, 3419):
+#   - GUARANTEED, and only this: the push is refused when the preflight
+#     inspection OBSERVES a different digest already at the coordinate, and
+#     the run fails closed when the coordinate cannot be read at all. This is
+#     a property of what the preflight observed — not an atomic one.
+#   - NOT GUARANTEED: there is no compare-and-swap, and therefore no
+#     no-repoint invariant. The registry tag stays a MUTABLE locator and
+#     Forgejo offers no native tag immutability here, so any other holder of
+#     package write authority on xtrape can overwrite it out of band. And
+#     because the inspect and the push are separate operations, a coordinate
+#     the preflight saw as ABSENT may be written by someone else in between —
+#     this workflow would then re-point that now-existing tag.
+#   - CONSEQUENCE: Integration Review, Human Acceptance and any downstream
+#     pin must bind the DIGEST. A tag alone is not a qualifying identity, and
+#     "the candidate a review examined" names a digest, never a tag.
+#
+# Trigger: manual dispatch — the Forgejo UI, or
+#   POST /repos/{owner}/{repo}/actions/workflows/build-candidate.yml/dispatches
+# with {"ref": "main"}. The dispatched ref decides the source; the workflow
+# refuses any source that is not an ancestor of origin/main.
+#
+# Secrets (organisation-level on xtrape; already provisioned):
+#   REGISTRY_USER / REGISTRY_TOKEN   package:write on xtrape
+#   (XTRAPE_NPM_TOKEN: the internal npm registry, build-time only, where the
+#    Dockerfile takes one)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-candidate-linux-ops-widget-nodejs
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: dind
+    steps:
+      - name: Checkout complete history
+        uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Self-test the coordinate gate (stub registry; every verdict pinned; before any registry credential)
+        run: bash scripts/test-oci-publish-coordinate.sh
+
+      - name: Self-test the buildx metadata digest extraction (fixtures captured from real builds)
+        run: bash scripts/test-buildx-metadata-digest.sh
+
+      - name: Bind candidate source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$GITHUB_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "dispatched source sha is not a full commit id" >&2; exit 1; }
+          git fetch origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "candidate source $SOURCE_SHA is not merged into main" >&2; exit 1; }
+          # The version is recorded as METADATA about where the source sits on the
+          # release train. It is never used as a coordinate: a candidate has no version.
+          RECORDED_VERSION="$(sed -n 's/^  "version": *"\([^"]*\)".*/\1/p' package.json | head -n 1)"
+          [ -n "$RECORDED_VERSION" ] || { echo "package.json has no version to record" >&2; exit 1; }
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "RECORDED_VERSION=$RECORDED_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "CANDIDATE_IMAGE=forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:candidate-$SOURCE_SHA" >> "$GITHUB_ENV"
+
+      - name: Login to the internal registry (xtrape)
+        shell: bash
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_TOKEN" ] || { echo "internal registry credentials missing" >&2; exit 1; }
+          echo "$REGISTRY_TOKEN" | docker login forgejo.xtrape.com -u "$REGISTRY_USER" --password-stdin
+
+      - name: Build once and push the candidate coordinate
+        shell: bash
+        env:
+          XTRAPE_NPM_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          METADATA="$RUNNER_TEMP/linux-ops-widget-nodejs-candidate-metadata.json"
+          docker buildx build --platform linux/amd64 --load --metadata-file "$METADATA" \
+            --label "org.opencontainers.image.source=https://forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.version=$RECORDED_VERSION" \
+            -t "$CANDIDATE_IMAGE" .
+          # Extract the digest AND prove it is the top-level descriptor layer —
+          # the same layer the registry read-back compares against. The script
+          # fails closed when the metadata cannot prove the layer; it never
+          # guesses from the driver. Self-tested in the step above.
+          CANDIDATE_DIGEST="$(./scripts/buildx-metadata-digest.sh "$METADATA")"
+          echo "CANDIDATE_DIGEST=$CANDIDATE_DIGEST" >> "$GITHUB_ENV"
+
+          # Coordinate gate (fail-closed: a coordinate that cannot be read is never
+          # treated as absent — review 3323; self-tested above). This binds writes
+          # made through this workflow only; the tag itself stays mutable (3409).
+          ./scripts/oci-publish-coordinate.sh "$CANDIDATE_IMAGE" "$CANDIDATE_DIGEST"
+
+      - name: Candidate record
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Read the coordinate back from the registry rather than trusting the
+          # build's own report of what it pushed.
+          PUSHED="$(docker buildx imagetools inspect "$CANDIDATE_IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [ "$PUSHED" = "$CANDIDATE_DIGEST" ] || {
+            echo "candidate digest parity failed: built=$CANDIDATE_DIGEST registry=$PUSHED" >&2; exit 1; }
+          # The qualifying identity of this candidate is the digest-qualified
+          # artifact, not the tag — downstream stages must pin THIS string.
+          printf 'candidate record: repo=%s source=%s recordedVersion=%s qualified=%s@%s tag=%s builtAt=%s\n' \
+            "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$RECORDED_VERSION" "$CANDIDATE_IMAGE" "$CANDIDATE_DIGEST" "$CANDIDATE_IMAGE" "$BUILD_TIME"
+
+      - name: Logout
+        if: ${{ always() }}
+        run: docker logout forgejo.xtrape.com || true

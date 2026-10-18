@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Runtime baseline: Node 24 (xtrape-docs reference/10-runtime-baseline.md §1).
+# The `node:24-bookworm` image here, `engines.node: ">=24"` in package.json, and
+# the `FROM node:24-bookworm` stages in the Dockerfile are one decision.
+#
+# Runner constraints this file is shaped around (verified on this Forgejo
+# instance): only one runner exists, so container jobs are serialized with
+# `needs` rather than run in parallel; alpine job containers cannot run
+# actions/checkout and have no package-CDN egress, so bookworm is used; the
+# runner has no github.com egress, so actions are pinned to the mirrored
+# actions/checkout commit already in use across the other Xtrape Node repos and
+# no tool is downloaded from a github release.
+jobs:
+  validate:
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Runtime baseline sentinel (engines / CI image / Dockerfile agree)
+        run: node scripts/check-runtime-baseline.mjs
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+      - name: Test
+        # CI=true is what vitest.config.ts keys the bounded worker pool on (#90);
+        # set it here explicitly rather than relying on the runner's ambient env.
+        env:
+          CI: 'true'
+        run: pnpm test
+
+  dependency-audit:
+    runs-on: docker
+    needs: validate
+    container:
+      image: node:24-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Dependency audit (fail on high/critical in production deps)
+        # Pinned to the public advisory DB: the runner's inherited registry is
+        # the internal Forgejo npm mirror, which does not implement the audit
+        # endpoint (/-/npm/v1/security/audits), so an inherited registry fails
+        # this step on a transport error instead of on a real advisory.
+        run: pnpm audit --prod --audit-level=high --registry https://registry.npmjs.org/
+
+  secret-scan:
+    runs-on: docker
+    needs: dependency-audit
+    container:
+      image: node:24-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Secret scan (secretlint, git-tracked files)
+        # gitleaks ships only as a github.com release, which this runner has no
+        # egress to; secretlint comes from npm, which the runner can reach. The
+        # scanner is a lockfile-pinned devDependency, never fetched ad hoc at run
+        # time: a supply-chain gate must not itself execute un-lockfiled remote
+        # code. Scanning exactly the tracked files is the gate's actual question
+        # ("did a secret get committed?") and avoids walking node_modules.
+        run: git ls-files -z | xargs -0 pnpm exec secretlint

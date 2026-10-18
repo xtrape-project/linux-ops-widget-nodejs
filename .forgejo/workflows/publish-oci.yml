@@ -1,0 +1,141 @@
+name: Publish OCI image
+
+# One build, two immutable coordinates, one digest (docs#271 P4; reference/06 §10.1):
+#   internal  forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:<version>          (this organisation)
+#   public    forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs:<version>  (anonymously pullable)
+# plus the `sha-<source>` twins of both. The public leg is the release
+# artifact an external consumer pins; the internal leg is what the
+# maintainers' own deployments pin. Both are read back and must carry the
+# SAME manifest digest, and an immutable coordinate that already holds
+# different content refuses the publish — a version is never re-pointed.
+# A coordinate whose current content cannot be READ (unauthorized, 5xx,
+# network) is never treated as absent: the gate stops instead of pushing
+# (scripts/oci-remote-digest.sh, review 3323).
+#
+# Triggered by an ANNOTATED source tag `v<version>` whose commit is merged into
+# main and whose version equals the authoritative package.json version. A
+# prerelease is never published from a tag.
+#
+# Secrets (organisation-level on xtrape):
+#   REGISTRY_USER / REGISTRY_TOKEN               package:write on xtrape
+#   PUBLIC_REGISTRY_USER / PUBLIC_REGISTRY_TOKEN package:write on xtrape-project
+#   (XTRAPE_NPM_TOKEN: the internal npm registry, build-time only, where the
+#    Dockerfile takes one)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-oci-linux-ops-widget-nodejs
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: dind
+    steps:
+      - name: Checkout complete history
+        uses: https://code.forgejo.org/actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Self-test the immutable-coordinate gate (stub registry; every verdict pinned)
+        run: bash scripts/test-oci-publish-coordinate.sh
+
+      - name: Self-test the buildx metadata digest extraction (fixtures captured from real builds)
+        run: bash scripts/test-buildx-metadata-digest.sh
+
+      - name: Bind annotated release tag, source and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/validate-release-version.sh "$VERSION"
+          case "$VERSION" in *-*) echo "prerelease $VERSION is never published from a tag" >&2; exit 1;; esac
+          [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag ] || { echo "release tag must be annotated" >&2; exit 1; }
+          SOURCE_SHA="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          [ "$SOURCE_SHA" = "$GITHUB_SHA" ] || { echo "tag source does not equal workflow SHA" >&2; exit 1; }
+          git fetch origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || { echo "release source is not merged into main" >&2; exit 1; }
+          PACKAGE_VERSION="$(sed -n 's/^  "version": *"\([^"]*\)".*/\1/p' package.json | head -n 1)"
+          [ "$VERSION" = "$PACKAGE_VERSION" ] || { echo "tag $VERSION != package.json $PACKAGE_VERSION" >&2; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "INTERNAL_IMAGE=forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:$VERSION" >> "$GITHUB_ENV"
+          echo "PUBLIC_IMAGE=forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs:$VERSION" >> "$GITHUB_ENV"
+          echo "INTERNAL_SHA_IMAGE=forgejo.xtrape.com/xtrape/linux-ops-widget-nodejs:sha-$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "PUBLIC_SHA_IMAGE=forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs:sha-$SOURCE_SHA" >> "$GITHUB_ENV"
+
+      - name: Login to the internal registry (xtrape)
+        shell: bash
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$REGISTRY_USER" ] && [ -n "$REGISTRY_TOKEN" ] || { echo "internal registry credentials missing" >&2; exit 1; }
+          echo "$REGISTRY_TOKEN" | docker login forgejo.xtrape.com -u "$REGISTRY_USER" --password-stdin
+
+      - name: Build once, protect immutable coordinates, push the internal leg
+        shell: bash
+        env:
+          XTRAPE_NPM_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          METADATA="$RUNNER_TEMP/linux-ops-widget-nodejs-build-metadata.json"
+          docker buildx build --platform linux/amd64 --load --metadata-file "$METADATA" \
+            --label "org.opencontainers.image.source=https://forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            -t "$INTERNAL_IMAGE" -t "$PUBLIC_IMAGE" -t "$INTERNAL_SHA_IMAGE" -t "$PUBLIC_SHA_IMAGE" .
+          # Extract the digest AND prove it is the top-level descriptor layer —
+          # the same layer the registry read-back compares against. The script
+          # fails closed when the metadata cannot prove the layer; it never
+          # guesses from the driver. Self-tested in the step above.
+          CANDIDATE_DIGEST="$(./scripts/buildx-metadata-digest.sh "$METADATA")"
+          echo "CANDIDATE_DIGEST=$CANDIDATE_DIGEST" >> "$GITHUB_ENV"
+
+          # Immutable-coordinate gate (fail-closed: a coordinate that cannot be read
+          # is never treated as absent — review 3323; self-tested above).
+          for image in "$INTERNAL_IMAGE" "$INTERNAL_SHA_IMAGE"; do
+            ./scripts/oci-publish-coordinate.sh "$image" "$CANDIDATE_DIGEST"
+          done
+
+      - name: Login to the public registry (xtrape-project) and push the public leg
+        shell: bash
+        env:
+          PUBLIC_REGISTRY_USER: ${{ secrets.PUBLIC_REGISTRY_USER }}
+          PUBLIC_REGISTRY_TOKEN: ${{ secrets.PUBLIC_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$PUBLIC_REGISTRY_USER" ] && [ -n "$PUBLIC_REGISTRY_TOKEN" ] || { echo "public registry credentials missing (PUBLIC_REGISTRY_USER / PUBLIC_REGISTRY_TOKEN)" >&2; exit 1; }
+          docker logout forgejo.xtrape.com || true
+          echo "$PUBLIC_REGISTRY_TOKEN" | docker login forgejo.xtrape.com -u "$PUBLIC_REGISTRY_USER" --password-stdin
+          # Immutable-coordinate gate (fail-closed: a coordinate that cannot be read
+          # is never treated as absent — review 3323; self-tested above).
+          for image in "$PUBLIC_IMAGE" "$PUBLIC_SHA_IMAGE"; do
+            ./scripts/oci-publish-coordinate.sh "$image" "$CANDIDATE_DIGEST"
+          done
+
+      - name: Anonymous read-back and provenance evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logout forgejo.xtrape.com || true
+          # The public coordinates must be readable WITHOUT a credential — that is the release property.
+          PD="$(docker buildx imagetools inspect "$PUBLIC_IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          PSD="$(docker buildx imagetools inspect "$PUBLIC_SHA_IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [ "$PD" = "$CANDIDATE_DIGEST" ] && [ "$PSD" = "$CANDIDATE_DIGEST" ] || {
+            echo "public digest parity failed: candidate=$CANDIDATE_DIGEST public=$PD publicSha=$PSD" >&2; exit 1; }
+          printf 'release evidence: repo=%s source=%s ref=%s version=%s digest=%s public=%s publicSha=%s internal=%s\n' \
+            "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$GITHUB_REF" "$VERSION" "$CANDIDATE_DIGEST" "$PUBLIC_IMAGE" "$PUBLIC_SHA_IMAGE" "$INTERNAL_IMAGE"
+
+      - name: Logout
+        if: ${{ always() }}
+        run: docker logout forgejo.xtrape.com || true

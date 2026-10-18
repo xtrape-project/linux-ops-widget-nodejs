@@ -1,0 +1,12 @@
+[
+  {
+    "id": "web-dev-01",
+    "host": "192.0.2.10",
+    "port": 22,
+    "username": "linux-ops",
+    "authMethod": "privateKey",
+    "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nEXAMPLE-NOT-A-REAL-KEY\n-----END OPENSSH PRIVATE KEY-----\n",
+    "hostKeyFingerprint": "SHA256:uNiQ3xAMPL3xAMPL3xAMPL3xAMPL3xAMPL3xAMPL3xA",
+    "environment": "development"
+  }
+]

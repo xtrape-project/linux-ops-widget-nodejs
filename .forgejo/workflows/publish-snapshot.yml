@@ -1,0 +1,152 @@
+name: Publish snapshot
+
+# Publishes the reviewed content of main to the canonical PUBLIC repository as
+# one append-only snapshot commit. Review happens on the pull request here;
+# this job is the mechanical step that follows a merge.
+#
+# This workflow is part of the published tree, so a copy of it lands in the
+# public repository. The job-level `if` below means that copy never runs: it
+# is scoped to the source repository by name. Publication must not depend on
+# the target repository happening to have Actions disabled or no secret set.
+#
+# Requires the REPOSITORY secret PUBLISH_TOKEN: a credential whose push reach
+# is EXACTLY xtrape-project/linux-ops-widget-nodejs and nothing else (a
+# publication account that collaborates on that one public repository). The
+# reach is proved mechanically before anything is pushed
+# (scripts/verify-publish-credential.sh); an organisation-wide token that can
+# write several public canonicals is refused there. Without a token the job
+# fails closed rather than publishing anonymously or silently skipping.
+#
+# Template invariants (scripts/test-publish-workflow.sh pins them): source
+# scope, one public target, credential reach proved first, this repository's
+# own mandatory gates (lint / typecheck / build / test) before publish, and
+# the retired github.com/xtrape-com coordinates denied by the guard.
+
+# Trigger: manual only, for now. The publication target under `xtrape-project/`
+# does not exist yet, and no valid per-repository target-scoped PUBLISH_TOKEN is
+# currently configured/proven for it, so a push-triggered run can only fail
+# closed — correct behaviour, but it fires on EVERY merge to main during the
+# internal build phase and turns main permanently red, which hides real CI
+# failures. (Storage scope and runtime availability are different things: a
+# credential may be present yet not reach exactly this target.)
+#
+# Restore automatic main-push publication ONLY after all three hold:
+#   (a) the public repository exists;
+#   (b) a valid per-repository target-scoped credential is provisioned AND
+#       mechanically verified by scripts/verify-publish-credential.sh;
+#   (c) the owner, or applicable policy, EXPLICITLY authorizes the transition
+#       to automatic public publication.
+# Infrastructure readiness (a)+(b) is a technical precondition; it does not by
+# itself grant the authority in (c).
+#
+# While manual-only, `workflow_dispatch` is the sole entry point, so the
+# source-revision guard below is a MAIN-PATH invariant, not a side road: a
+# dispatch may name any ref, and publication must still only ever be the
+# reviewed content of main.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-snapshot
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: xtrape/linux-ops-widget-nodejs
+
+jobs:
+  publish:
+    # Source repository only. The published copy of this file is inert.
+    if: ${{ github.repository == 'xtrape/linux-ops-widget-nodejs' }}
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Source revision guard (publication is only ever the reviewed main)
+        # `workflow_dispatch` can name ANY ref. The job-level `if` proves the
+        # source REPOSITORY; this proves the source REVISION. It runs before any
+        # credential is read, so a wrong ref never reaches the publish path.
+        env:
+          # The ref name must arrive as environment DATA, never as shell source:
+          # `$(...)` and backticks are legal in a git ref name, so interpolating
+          # the context straight into the script would execute them BEFORE the
+          # comparison below ever runs — and the steps after this one read
+          # PUBLISH_TOKEN.
+          PUBLISH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          ref="$PUBLISH_REF"
+          if [ "$ref" != "refs/heads/main" ]; then
+            echo "publish-snapshot: refusing to publish from '$ref'; only refs/heads/main is publishable" >&2
+            exit 1
+          fi
+          git fetch --quiet origin main
+          head_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse FETCH_HEAD)"
+          if [ "$head_sha" != "$main_sha" ]; then
+            echo "publish-snapshot: checked-out $head_sha is not current origin/main $main_sha; refusing" >&2
+            exit 1
+          fi
+          echo "source revision guard: refs/heads/main @ $head_sha"
+
+      - name: Guard self-test (the link verifier must fail closed before it is trusted)
+        run: bash scripts/test-verify-public-link.sh
+
+      - name: Guard self-test (acknowledgement is location-bound; deny patterns never rendered)
+        run: bash scripts/test-publish-guard.sh
+
+      - name: Credential self-test (only an exact-reach token publishes)
+        run: bash scripts/test-verify-publish-credential.sh
+
+      - name: Workflow self-test (the template invariants hold for this repository)
+        run: bash scripts/test-publish-workflow.sh
+
+      - name: This repository's mandatory gates (publication must not ship a broken tree)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+          pnpm install --frozen-lockfile
+          pnpm lint
+          pnpm typecheck
+          pnpm build
+          pnpm test
+
+      - name: Prove the credential reaches exactly the public target
+        env:
+          PUBLIC_REPO_URL: https://forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs.git
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          test -n "$PUBLISH_TOKEN" || {
+            echo "PUBLISH_TOKEN is not configured; refusing to continue" >&2
+            exit 1
+          }
+          bash scripts/verify-publish-credential.sh
+
+      - name: Publish snapshot
+        env:
+          PUBLIC_REPO_URL: https://forgejo.xtrape.com/xtrape-project/linux-ops-widget-nodejs.git
+          SOURCE_REPO: ${{ env.SOURCE_REPO }}
+          PUBLIC_NAMESPACE: xtrape-project
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          # The retired GitHub coordinates are never a public canonical
+          # (docs#212 / #234: GitHub leg not-published); a tree that still
+          # names them is refused, not acknowledged away. Operator deny
+          # patterns (a secret) are appended.
+          EXTRA_DENY_PATTERNS: |
+            github\.com/xtrape-com
+            github\.com/xtrape/
+            ${{ secrets.PUBLISH_DENY_PATTERNS }}
+          # Fingerprint-bound acknowledgement to publish despite guard findings
+          # that are known false positives (a repository VARIABLE, not a secret:
+          # it is a hash). It matches only while the findings are unchanged.
+          PUBLISH_GUARD_ACK: ${{ vars.PUBLISH_GUARD_ACK }}
+        run: |
+          test -n "$PUBLISH_TOKEN" || {
+            echo "PUBLISH_TOKEN is not configured; refusing to continue" >&2
+            exit 1
+          }
+          bash scripts/publish-snapshot.sh

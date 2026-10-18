@@ -1,0 +1,19 @@
+{
+  "servers.add@1.0.2": "sha256:55935c44328469c685f16d1c0a6de701e5d063736e4c602ea87f4d3b1a249ed4",
+  "servers.list@1.0.2": "sha256:9ae62f30b59834e9425978aae55ac2198c64f763e600954f305a8568ba14d95d",
+  "servers.manage@1.0.2": "sha256:06aadfd6c472b755102621e894b8d548a8c5a019d1833b88dad3ad451a00215c",
+  "servers.probe-host-key@1.0.2": "sha256:6e774a129cf03a59c7d67e5f3a98672e4b5b1d29425b13b8272c5128f4ac1d2c",
+  "servers.record-probed-shells@1.0.2": "sha256:4d2bcd3a5903a07d6897dd27941b65dde353a55c2e565dac5beb9aa15b73ce82",
+  "servers.remove@1.0.2": "sha256:c7bba9bf7858c8a0ecd9179c6838c3d5fb006449401d9077830e4fe8833f483c",
+  "servers.rotate-host-key@1.0.2": "sha256:6c188734c0cb488cb93d8af28bf0ba8deb2a37e1e2bbf5161f0b88cca45036f9",
+  "servers.test@1.0.2": "sha256:b123dc7d1823a72df506c61f3b5022a4a5c486aa1be84a845b1a3d85d98ca7a5",
+  "servers.update@1.0.2": "sha256:662c98c8605bb83c3b72efe1e57bd54eb07fced07d8dbdbfb898f9b2df14e488",
+  "tasks.add@1.0.2": "sha256:7e3cdca0f899e36160b9e5bdc611a63603e1b752503f3969465c51c5864939bd",
+  "tasks.disable@1.0.2": "sha256:4eb9d0532adc8d70a33c890859f5fb367d874f97ec42071fd08bb31a60deff88",
+  "tasks.enable@1.0.2": "sha256:6b6875d87b7210465b368d6f9137dd1915101bbf45960671de96a0ac3bbc8ca2",
+  "tasks.list@1.0.2": "sha256:030e90e253fda9d3e7ff60a61e301ab2922ab8979aea862c2cc7215bc5c16287",
+  "tasks.manage@1.0.2": "sha256:6631c8db45395604a6f3b29dcf7a34edd7526d1916fa894de477a7c0128325ec",
+  "tasks.remove@1.0.2": "sha256:df5ae2cc04731d6915ac8a95ee70f1d3ca0f406373117f3cf0b12f8e642e8d0f",
+  "tasks.update@1.0.2": "sha256:52e1da1dac62f1539a2d9df138c74d9fb062a1bfe68b1af4bd0baf377ee4ffdf",
+  "tasks.view@1.0.2": "sha256:5ab1d47e513624c65cc107d67c6e6260c66ae74cf7df68cbba6fc1d7e626b637"
+}
