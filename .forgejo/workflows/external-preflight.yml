@@ -61,6 +61,23 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m unittest discover -s release -p test_external_preflight.py
+      - name: Diagnose fixed Gitee DNS without credentials
+        continue-on-error: true
+        env:
+          TARGET_PLATFORM: gitee
+          TARGET_DIAGNOSTIC_MODE: dns
+        run: |
+          python3 release/external_preflight.py || true
+          node --input-type=module <<'NODE'
+          import dns from 'node:dns/promises';
+          const report = {platform: 'gitee', diagnostic: 'node_dns', writes_attempted: 0};
+          const allowed = new Set(['EAI_AGAIN','EAI_NONAME','ENOTFOUND','ETIMEOUT','ECONNREFUSED','ESERVFAIL']);
+          for (const [name, call] of [['lookup', () => dns.lookup('gitee.com', {all:true})], ['resolve4', () => dns.resolve4('gitee.com')]]) {
+            try { await call(); report[name] = 'RESOLVED'; }
+            catch (error) { report[name] = allowed.has(error.code) ? error.code : 'DNS_OTHER_FAILURE'; }
+          }
+          console.log(JSON.stringify(report));
+          NODE
       - name: Read fixed external target
         env:
           TARGET_PLATFORM: gitee

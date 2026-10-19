@@ -89,5 +89,83 @@ class Tests(unittest.TestCase):
             self.assertEqual(p.main(),1)
             self.assertEqual(json.loads(output.getvalue())["transport_category"],"TIMEOUT")
             self.assertNotIn("secret-value",output.getvalue())
+    def test_outer_whitespace_normalized_in_request_only(self):
+        class Opener:
+            def open(self,req,timeout):
+                self.request=req
+                return Response(b'{"full_name":"xtrape-project/linux-ops-widget-nodejs"}')
+        op=Opener()
+        with patch.dict(os.environ,{"GH_PUBLISH_TOKEN":" \tfixture-value\r\n"}):
+            result=p.probe_details("github",op)
+            self.assertEqual(os.environ["GH_PUBLISH_TOKEN"]," \tfixture-value\r\n")
+        self.assertEqual(op.request.get_header("Authorization"),"Bearer fixture-value")
+        self.assertTrue(result["credential_input"]["outer_whitespace_removed"])
+        self.assertNotIn("fixture-value",json.dumps(result))
+    def test_malformed_token_never_sent(self):
+        for value in ['Bearer fixture-value','GH_PUBLISH_TOKEN=fixture-value','"fixture-value"','***','fixture\nvalue','fixture-é']:
+            with patch.dict(os.environ,{"GH_PUBLISH_TOKEN":value}), patch.object(p.urllib.request,'build_opener') as build:
+                result=p.probe_details("github")
+                self.assertEqual(result["result"],"MISSING_OR_INVALID_CREDENTIAL_INPUT")
+                build.assert_not_called()
+                self.assertNotIn(value,json.dumps(result))
+    def test_gitlab_bearer_uses_selected_secret(self):
+        class GitLabResponse(Response):
+            def geturl(self):return p.TARGETS['gitlab'][0]
+        class Opener:
+            def open(self,req,timeout):
+                self.request=req
+                return GitLabResponse(b'{"path_with_namespace":"xtrape-project/linux-ops-widget-nodejs"}')
+        op=Opener()
+        with patch.dict(os.environ,{'GITLAB_PUBLISH_TOKEN':'fixture-value'}):
+            self.assertEqual(p.probe_details('gitlab',op)['result'],'TARGET_READABLE_WRITE_UNPROVEN')
+        self.assertEqual(op.request.get_header('Authorization'),'Bearer fixture-value')
+        self.assertIsNone(op.request.get_header('Private-token'))
+    def test_only_temporary_dns_is_retried_bounded(self):
+        class Opener:
+            attempts=0
+            def open(self,*a,**kw):
+                self.attempts+=1
+                if self.attempts<3:raise urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN,'secret-value'))
+                return Response(b'{}')
+        op=Opener();delays=[]
+        response,attempts=p.fixed_target_open(op,None,sleep=delays.append)
+        response.close()
+        self.assertEqual(attempts,3);self.assertEqual(delays,[1,2])
+        class Failing:
+            attempts=0
+            def open(self,*a,**kw):
+                self.attempts+=1
+                raise urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN,'secret-value'))
+        op=Failing()
+        with self.assertRaises(urllib.error.URLError):p.fixed_target_open(op,None,sleep=lambda _:None)
+        self.assertEqual(op.attempts,3)
+    def test_permanent_dns_and_http_never_retried(self):
+        for error in [urllib.error.URLError(socket.gaierror(socket.EAI_NONAME,'secret-value')),urllib.error.HTTPError('https://example.invalid',401,'secret-value',{},io.BytesIO(b'')),TimeoutError('secret-value')]:
+            class Opener:
+                attempts=0
+                def open(self,*a,**kw):self.attempts+=1;raise error
+            op=Opener();delays=[]
+            with self.assertRaises(Exception):p.fixed_target_open(op,None,sleep=delays.append)
+            self.assertEqual(op.attempts,1);self.assertEqual(delays,[])
+            if hasattr(error,'close'):error.close()
+    def test_dns_diagnostic_has_no_authentication(self):
+        def resolver(host,port,**kw):
+            self.assertEqual(host,'gitee.com');self.assertEqual(port,443)
+            return [(socket.AF_INET,socket.SOCK_STREAM,6,'',('203.0.113.1',443))]
+        with patch.dict(os.environ,{},clear=True):result=p.dns_diagnostic('gitee',resolver)
+        self.assertEqual(result['result'],'DNS_RESOLVED')
+        self.assertTrue(result['ipv4']);self.assertNotIn('203.0.113.1',json.dumps(result))
+        for errno,expected in [(socket.EAI_AGAIN,'DNS_TEMPORARY_FAILURE'),(socket.EAI_NONAME,'DNS_NAME_NOT_FOUND')]:
+            def fails(*a,**kw):raise socket.gaierror(errno,'secret-value')
+            result=p.dns_diagnostic('gitee',fails)
+            self.assertEqual(result['result'],expected);self.assertNotIn('secret-value',json.dumps(result))
+    def test_gitlab_oauth_error_allowlist(self):
+        for code in ['invalid_token','insufficient_scope','invalid_grant']:
+            self.assertEqual(p.service_error(json.dumps({'error':code}),'gitlab'),code.upper())
+        self.assertEqual(p.service_error(b'{"error":"secret-value"}','gitlab'),'UNRECOGNIZED')
+    def test_auth_challenge_is_fixed_category_only(self):
+        for value,expected in [('Bearer realm="secret-value", error="invalid_token"','BEARER_INVALID_TOKEN'),('Bearer error="insufficient_scope"','BEARER_INSUFFICIENT_SCOPE'),('Basic realm="secret-value"','BASIC'),('secret-value','OTHER_OR_ABSENT')]:
+            result=p.auth_challenge({'WWW-Authenticate':value})
+            self.assertEqual(result,expected);self.assertNotIn('secret-value',result)
 
 if __name__ == "__main__": unittest.main()
