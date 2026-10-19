@@ -1,0 +1,49 @@
+name: Fixed GitHub or GitLab authentication diagnosis
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: GET-only fixed target; never creates or pushes a repository
+        required: true
+        type: choice
+        options: [github, gitlab]
+concurrency:
+  group: external-source-${{ inputs.platform }}
+  cancel-in-progress: false
+jobs:
+  github:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'github' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -W error::ResourceWarning -m unittest discover -s release -p test_external_auth_diagnostic.py
+      - name: GET only fixed identity and repository endpoints
+        env:
+          TARGET_PLATFORM: github
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
+          GH_PUBLISH_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
+        run: python3 release/external_auth_diagnostic.py
+  gitlab:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'gitlab' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -W error::ResourceWarning -m unittest discover -s release -p test_external_auth_diagnostic.py
+      - name: GET only fixed identity and repository endpoints
+        env:
+          TARGET_PLATFORM: gitlab
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
+          GITLAB_PUBLISH_TOKEN: ${{ secrets.GITLAB_PUBLISH_TOKEN }}
+        run: python3 release/external_auth_diagnostic.py

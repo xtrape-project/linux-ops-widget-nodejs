@@ -34,6 +34,8 @@ jobs:
         run: node scripts/check-runtime-baseline.mjs
       - name: Read-only Registry diagnostic safety tests
         run: python3 scripts/test-diagnose-registry-auth.py
+      - name: Fixed external authentication diagnostic safety tests
+        run: python3 -W error::ResourceWarning -m unittest discover -s release -p test_external_auth_diagnostic.py
       - name: Lint
         run: pnpm lint
       - name: Typecheck
