@@ -32,6 +32,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Runtime baseline sentinel (engines / CI image / Dockerfile agree)
         run: node scripts/check-runtime-baseline.mjs
+      - name: Read-only Registry diagnostic safety tests
+        run: python3 scripts/test-diagnose-registry-auth.py
       - name: Lint
         run: pnpm lint
       - name: Typecheck
