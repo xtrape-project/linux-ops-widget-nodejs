@@ -1,0 +1,99 @@
+name: External public source delivery
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Fixed target platform under xtrape-project
+        required: true
+        type: choice
+        options: [github, gitlab, codeberg, gitee]
+      mode:
+        description: Probe Git access or publish this executing public main
+        required: true
+        default: probe
+        type: choice
+        options: [probe, publish]
+concurrency:
+  group: external-source-${{ inputs.platform }}
+  cancel-in-progress: false
+jobs:
+  github:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'github' }}
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_source.py
+      - name: Deliver only fixed public Git source
+        env:
+          TARGET_PLATFORM: github
+          DELIVERY_MODE: ${{ inputs.mode }}
+          SOURCE_SHA: ${{ github.sha }}
+          EXTERNAL_GIT_USERNAME: ${{ vars.GH_PUBLISH_USER }}
+          GH_PUBLISH_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
+        run: python3 release/external_source.py
+  gitlab:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'gitlab' }}
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_source.py
+      - name: Deliver only fixed public Git source
+        env:
+          TARGET_PLATFORM: gitlab
+          DELIVERY_MODE: ${{ inputs.mode }}
+          SOURCE_SHA: ${{ github.sha }}
+          EXTERNAL_GIT_USERNAME: ${{ vars.GITLAB_PUBLISH_USER }}
+          GITLAB_PUBLISH_TOKEN: ${{ secrets.GITLAB_PUBLISH_TOKEN }}
+        run: python3 release/external_source.py
+  codeberg:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'codeberg' }}
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_source.py
+      - name: Deliver only fixed public Git source
+        env:
+          TARGET_PLATFORM: codeberg
+          DELIVERY_MODE: ${{ inputs.mode }}
+          SOURCE_SHA: ${{ github.sha }}
+          EXTERNAL_GIT_USERNAME: ${{ vars.CODEBERG_PUBLISH_USER }}
+          CODEBERG_PUBLISH_TOKEN: ${{ secrets.CODEBERG_PUBLISH_TOKEN }}
+        run: python3 release/external_source.py
+  gitee:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' && inputs.platform == 'gitee' }}
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_source.py
+      - name: Deliver only fixed public Git source
+        env:
+          TARGET_PLATFORM: gitee
+          DELIVERY_MODE: ${{ inputs.mode }}
+          SOURCE_SHA: ${{ github.sha }}
+          EXTERNAL_GIT_USERNAME: ${{ vars.GITEE_PUBLISH_USER }}
+          GITEE_PUBLISH_TOKEN: ${{ secrets.GITEE_PUBLISH_TOKEN }}
+        run: python3 release/external_source.py
