@@ -55,11 +55,19 @@ class Tests(unittest.TestCase):
         self.assertEqual(c,['GET','POST','GET'])
         self.assertEqual(r['result'],'CREATE_RECONCILED_EMPTY_PUBLIC_TARGET')
     def test_conflict_does_not_authorize_modifying_existing_content(self):
-        r,c=self.scenario([(404,None),(409,None),(200,dict(META,empty=False))])
-        self.assertEqual(c,['GET','POST','GET']);self.assertEqual(r['result'],'CODEBERG_CREATE_RECONCILIATION_NOT_EMPTY')
+        for empty in (True,False):
+            r,c=self.scenario([(404,None),(409,None),(200,dict(META,empty=empty))])
+            self.assertEqual(c,['GET','POST']);self.assertEqual(r['result'],'CODEBERG_CREATE_CONFLICT')
+    def test_definitive_redirect_or_other_client_rejection_cannot_be_success(self):
+        for status in (301,302,307,400,404,422,429):
+            r,c=self.scenario([(404,None),(status,None),(200,META)])
+            self.assertEqual(c,['GET','POST']);self.assertEqual(r['result'],'CODEBERG_CREATE_REJECTED')
     def test_unconfirmed_create_remains_unconfirmed(self):
-        r,c=self.scenario([(404,None),(400,None),(404,None)])
+        r,c=self.scenario([(404,None),(503,None),(404,None)])
         self.assertEqual(c,['GET','POST','GET']);self.assertEqual(r['result'],'CODEBERG_CREATE_UNCONFIRMED')
+    def test_server_uncertainty_reconciles_only_empty_public_target(self):
+        r,c=self.scenario([(404,None),(503,None),(200,dict(META,empty=False))])
+        self.assertEqual(c,['GET','POST','GET']);self.assertEqual(r['result'],'CODEBERG_CREATE_RECONCILIATION_NOT_EMPTY')
     def test_nonempty_create_response_fails_without_another_write(self):
         r,c=self.scenario([(404,None),(201,dict(META,empty=False))])
         self.assertEqual(c,['GET','POST']);self.assertEqual(r['result'],'CODEBERG_CREATED_TARGET_NOT_EMPTY')

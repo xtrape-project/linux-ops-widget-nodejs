@@ -76,12 +76,16 @@ def prepare(call=request, run=execute):
                     result='CREATED_EMPTY_PUBLIC_TARGET'
                 elif status in (401,403):
                     raise Refusal('CODEBERG_CREATE_ACCESS_REJECTED')
+                elif status==409:
+                    raise Refusal('CODEBERG_CREATE_CONFLICT')
+                elif 300<=status<500:
+                    raise Refusal('CODEBERG_CREATE_REJECTED')
                 else:
                     raise Refusal('CODEBERG_CREATE_UNCONFIRMED')
             except Refusal as failure:
-                if str(failure) in ('CODEBERG_CREATE_ACCESS_REJECTED','CODEBERG_CREATED_TARGET_NOT_EMPTY','CODEBERG_TARGET_IDENTITY_OR_VISIBILITY_REFUSED'):
+                if str(failure) in ('CODEBERG_CREATE_ACCESS_REJECTED','CODEBERG_CREATE_CONFLICT','CODEBERG_CREATE_REJECTED','CODEBERG_CREATED_TARGET_NOT_EMPTY','CODEBERG_TARGET_IDENTITY_OR_VISIBILITY_REFUSED'):
                     raise
-                # A write timeout/conflict is reconciled with GET, never POST.
+                # Only an uncertain write is reconciled with GET, never POST.
                 report['phase']='create_readback'
                 checked,observed=call('GET',token)
                 if checked!=200:raise Refusal('CODEBERG_CREATE_UNCONFIRMED') from None
