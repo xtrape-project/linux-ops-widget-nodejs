@@ -34,6 +34,7 @@ jobs:
           TARGET_PLATFORM: github
           DELIVERY_MODE: ${{ inputs.mode }}
           SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
           EXTERNAL_GIT_USERNAME: ${{ vars.GH_PUBLISH_USER }}
           GH_PUBLISH_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
         run: python3 release/external_source.py
@@ -54,6 +55,7 @@ jobs:
           TARGET_PLATFORM: gitlab
           DELIVERY_MODE: ${{ inputs.mode }}
           SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
           EXTERNAL_GIT_USERNAME: ${{ vars.GITLAB_PUBLISH_USER }}
           GITLAB_PUBLISH_TOKEN: ${{ secrets.GITLAB_PUBLISH_TOKEN }}
         run: python3 release/external_source.py
@@ -74,6 +76,7 @@ jobs:
           TARGET_PLATFORM: codeberg
           DELIVERY_MODE: ${{ inputs.mode }}
           SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
           EXTERNAL_GIT_USERNAME: ${{ vars.CODEBERG_PUBLISH_USER }}
           CODEBERG_PUBLISH_TOKEN: ${{ secrets.CODEBERG_PUBLISH_TOKEN }}
         run: python3 release/external_source.py
@@ -94,6 +97,7 @@ jobs:
           TARGET_PLATFORM: gitee
           DELIVERY_MODE: ${{ inputs.mode }}
           SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SERVER_URL: ${{ github.server_url }}
           EXTERNAL_GIT_USERNAME: ${{ vars.GITEE_PUBLISH_USER }}
           GITEE_PUBLISH_TOKEN: ${{ secrets.GITEE_PUBLISH_TOKEN }}
         run: python3 release/external_source.py

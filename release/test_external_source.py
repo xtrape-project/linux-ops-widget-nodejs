@@ -9,6 +9,16 @@ from unittest.mock import patch
 import external_source as p
 
 class Tests(unittest.TestCase):
+    def test_source_origin_bound_to_issuer_and_exact_public_path(self):
+        root='http://ci.example.invalid'
+        self.assertTrue(p.source_origin_matches(root+'/'+p.REPOSITORY,root))
+        self.assertTrue(p.source_origin_matches(root+'/'+p.REPOSITORY+'.git',root+'/'))
+        for origin,issuer in [(root+'/xtrape/linux-ops-widget-nodejs',root),(root+'/'+p.REPOSITORY+'?secret-value',root),(root+'/'+p.REPOSITORY,'https://other.example.invalid'),(root+'/'+p.REPOSITORY,'http://secret-value@ci.example.invalid'),(root+'/'+p.REPOSITORY,root+'/prefix'),(root+'/'+p.REPOSITORY,''),(root+'#/'+p.REPOSITORY,root+'#'),(root+'/'+p.REPOSITORY,root+'\n'),('http://ci.example.invalid:bad/'+p.REPOSITORY,'http://ci.example.invalid:bad')]:
+            self.assertFalse(p.source_origin_matches(origin,issuer))
+    def test_git_errors_are_fixed_codes_only(self):
+        for text,expected in [('secret-value Authentication failed','GIT_AUTHENTICATION_REJECTED'),('secret-value returned error: 403','GIT_HTTP_403'),('Could not resolve host: secret-value','GIT_DNS_FAILURE'),('SSL certificate problem secret-value','GIT_TLS_FAILURE'),('repository secret-value not found','GIT_NOT_FOUND_OR_NOT_VISIBLE'),('secret-value','GIT_COMMAND_REJECTED')]:
+            result=p.git_failure(text)
+            self.assertEqual(result,expected);self.assertNotIn('secret-value',result)
     def test_credentials_only_in_transient_target_header(self):
         url=p.TARGETS['github'][0]
         with patch.dict(os.environ,{'GH_PUBLISH_TOKEN':'fixture-secret','GIT_TRACE_CURL':'1','GIT_CONFIG_COUNT':'1','GIT_CONFIG_KEY_0':'credential.helper','GIT_CONFIG_VALUE_0':'store'}):
@@ -64,6 +74,9 @@ class Tests(unittest.TestCase):
                 if args[:2]==['rev-parse','HEAD^{tree}'] and cwd and case=='anonymous-mismatch':return '0'*40
                 return output
             context={'GITHUB_REPOSITORY':p.REPOSITORY,'GITHUB_REF':'refs/heads/main','SOURCE_SHA':sha,'GH_PUBLISH_TOKEN':'fixture-secret'}
+            if case=='ci-alias':
+                context['SOURCE_SERVER_URL']='http://ci.example.invalid'
+                git('remote','set-url','origin',context['SOURCE_SERVER_URL']+'/'+p.REPOSITORY)
             with patch.dict(os.environ,context):
                 result=p.deliver('github','probe' if case=='probe' else 'publish',run)
                 if case=='idempotent':
@@ -89,6 +102,7 @@ class Tests(unittest.TestCase):
                 self.assertNotIn('.env',git('--git-dir',str(bare),'ls-tree','-r','--name-only','main').splitlines())
                 self.assertEqual(len(pushes),1)
     def test_actual_git_delivery(self):self.fixture('success')
+    def test_real_git_delivery_with_context_bound_checkout_alias(self):self.fixture('ci-alias')
     def test_fast_forward_of_existing_public_history(self):self.fixture('fast-forward')
     def test_target_must_be_anonymously_readable_before_write(self):self.fixture('private')
     def test_read_only_probe_does_not_write(self):self.fixture('probe')
