@@ -1,0 +1,15 @@
+name: Public release guard tests
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_promote.py

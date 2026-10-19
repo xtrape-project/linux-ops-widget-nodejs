@@ -1,0 +1,26 @@
+name: Promote accepted public 0.8.7
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-candidate
+  cancel-in-progress: false
+jobs:
+  promote:
+    if: ${{ github.repository_owner == 'xtrape-project' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Test release guards without credentials
+        run: python3 -m unittest discover -s release -p test_promote.py
+      - name: Promote fixed accepted manifest and verify anonymous exact bytes
+        env:
+          REGISTRY_USER: ${{ vars.REGISTRY_USER || secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: python3 release/promote.py
