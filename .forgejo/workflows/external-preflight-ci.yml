@@ -14,3 +14,4 @@ jobs:
       - run: python3 -m unittest discover -s release -p test_external_preflight.py
       - run: python3 -m unittest discover -s release -p test_external_source.py
       - run: python3 -m unittest discover -s release -p test_external_dns.py
+      - run: python3 -m unittest discover -s release -p test_external_codeberg_target.py
