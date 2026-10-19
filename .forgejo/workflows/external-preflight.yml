@@ -1,0 +1,68 @@
+name: External publication target preflight
+on:
+  workflow_dispatch:
+jobs:
+  github:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_preflight.py
+      - name: Read fixed external target
+        env:
+          TARGET_PLATFORM: github
+          GH_PUBLISH_TOKEN: ${{ secrets.GH_PUBLISH_TOKEN }}
+        run: python3 release/external_preflight.py
+  gitlab:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_preflight.py
+      - name: Read fixed external target
+        env:
+          TARGET_PLATFORM: gitlab
+          GITLAB_PUBLISH_TOKEN: ${{ secrets.GITLAB_PUBLISH_TOKEN }}
+        run: python3 release/external_preflight.py
+  codeberg:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_preflight.py
+      - name: Read fixed external target
+        env:
+          TARGET_PLATFORM: codeberg
+          CODEBERG_PUBLISH_TOKEN: ${{ secrets.CODEBERG_PUBLISH_TOKEN }}
+        run: python3 release/external_preflight.py
+  gitee:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 5
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_preflight.py
+      - name: Read fixed external target
+        env:
+          TARGET_PLATFORM: gitee
+          GITEE_PUBLISH_TOKEN: ${{ secrets.GITEE_PUBLISH_TOKEN }}
+        run: python3 release/external_preflight.py
