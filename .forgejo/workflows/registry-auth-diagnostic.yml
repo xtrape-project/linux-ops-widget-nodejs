@@ -1,0 +1,15 @@
+name: Read-only Registry authentication diagnostic
+on:
+  workflow_dispatch:
+jobs:
+  diagnose:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: dind
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Classify authentication without printing credentials or response bodies
+        env:
+          REGISTRY_USER: ${{ vars.REGISTRY_USER || secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: python3 scripts/diagnose-registry-auth.py
