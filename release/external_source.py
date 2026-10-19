@@ -50,6 +50,24 @@ def git_failure(stderr):
         return "GIT_TLS_FAILURE"
     if "authentication failed" in value or "http basic: access denied" in value:
         return "GIT_AUTHENTICATION_REJECTED"
+    if "could not read username" in value or "could not read password" in value or "terminal prompts disabled" in value:
+        return "GIT_CREDENTIAL_CHALLENGE"
+    if "access token" in value and ("expired" in value or "invalid" in value):
+        return "GIT_TOKEN_REJECTED"
+    if "requested url returned error: 402" in value:
+        return "GIT_HTTP_402"
+    if "gnutls_handshake" in value or "tls connection was non-properly terminated" in value:
+        return "GIT_TLS_HANDSHAKE_FAILURE"
+    if "failed to connect" in value or "connection timed out" in value or "connection reset" in value or "empty reply from server" in value:
+        return "GIT_CONNECTION_FAILURE"
+    if "http/2 stream" in value or "http2 framing" in value:
+        return "GIT_HTTP2_FAILURE"
+    if "not allowed to download code" in value or "access denied" in value or "permission denied" in value:
+        return "GIT_TARGET_ACCESS_DENIED"
+    if "unable to update url base from redirection" in value or re.search(r"returned error: (301|302|303|307|308)\b",value):
+        return "GIT_REDIRECT_REFUSED"
+    if "not a git repository" in value or "detected dubious ownership" in value:
+        return "GIT_LOCAL_CONTEXT_REFUSED"
     if "repository not found" in value or "repository" in value and "not found" in value:
         return "GIT_NOT_FOUND_OR_NOT_VISIBLE"
     match=re.search(r"returned error: (401|403|404|429|5[0-9]{2})\b",value)

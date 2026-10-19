@@ -1,9 +1,11 @@
 import base64
+import http.server
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import external_source as p
@@ -31,11 +33,35 @@ class Tests(unittest.TestCase):
         self.assertEqual(entries['http.followRedirects'],'false')
         self.assertEqual(entries['http.'+url+'.extraHeader'],'Authorization: Basic '+base64.b64encode(b'x-access-token:fixture-secret').decode())
         self.assertNotIn('fixture-secret',json.dumps(anon))
+    def test_auth_challenge_uses_real_git_without_prompt_or_secret_output(self):
+        class Reject(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401)
+                self.send_header('WWW-Authenticate','Basic realm="fixture"')
+                self.end_headers()
+            def log_message(self,*args):pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Reject)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            url='http://127.0.0.1:'+str(server.server_port)+'/fixed.git'
+            with tempfile.TemporaryDirectory() as cwd, self.assertRaises(p.Refusal) as caught:
+                p.execute(['ls-remote','--heads',url],p.git_environment(url,'fixture-secret','oauth2'),cwd)
+            self.assertEqual(str(caught.exception),'GIT_CREDENTIAL_CHALLENGE')
+            self.assertNotIn('fixture-secret',str(caught.exception))
+        finally:
+            server.shutdown();server.server_close();thread.join()
+    def test_additional_git_failures_never_expose_raw_error(self):
+        for raw,expected in [('could not read Username secret-value terminal prompts disabled','GIT_CREDENTIAL_CHALLENGE'),('Access token secret-value has expired','GIT_TOKEN_REJECTED'),('The requested URL returned error: 402 secret-value','GIT_HTTP_402'),('gnutls_handshake() failed secret-value','GIT_TLS_HANDSHAKE_FAILURE'),('Failed to connect secret-value','GIT_CONNECTION_FAILURE'),('HTTP/2 stream secret-value was not closed cleanly','GIT_HTTP2_FAILURE'),('not allowed to download code secret-value','GIT_TARGET_ACCESS_DENIED')]:
+            self.assertEqual(p.git_failure(raw),expected)
+            self.assertNotIn('secret-value',p.git_failure(raw))
     def test_source_context_and_input_rejections(self):
         with patch.dict(os.environ,{},clear=True):
             self.assertEqual(p.deliver('github','publish')['result'],'SOURCE_CONTEXT_REFUSED')
             self.assertEqual(p.deliver('evil','publish')['result'],'INVALID_INPUT')
             self.assertEqual(p.deliver('github','force')['result'],'INVALID_INPUT')
+    def test_redirect_and_local_context_errors_are_fixed_categories(self):
+        for raw,expected in [('unable to update url base from redirection secret-value','GIT_REDIRECT_REFUSED'),('The requested URL returned error: 302 secret-value','GIT_REDIRECT_REFUSED'),('not a git repository: secret-value','GIT_LOCAL_CONTEXT_REFUSED'),('detected dubious ownership secret-value','GIT_LOCAL_CONTEXT_REFUSED')]:
+            self.assertEqual(p.git_failure(raw),expected)
     def test_refs_fail_closed(self):
         for text,expected in [('garbage','INVALID_REMOTE_REFS'),('a'*40+'\trefs/heads/master','TARGET_NONEMPTY_WITHOUT_MAIN')]:
             with self.assertRaisesRegex(p.Refusal,expected):p.remote_head('https://fixed.invalid',{},lambda *a:text)
