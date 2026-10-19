@@ -113,9 +113,50 @@ jobs:
             echo 'candidate registry read refused; no write attempted' >&2
             exit 1
           fi
-          grep -Eqi 'manifest unknown|MANIFEST_UNKNOWN' "$DOCKER_CONFIG/read-error" || {
-            echo 'candidate absence not proven; no write attempted' >&2; exit 1;
-          }
+          # CLI versions reduce MANIFEST_UNKNOWN to plain "not found". Never
+          # authorize a write from that text: prove absence using the Registry API.
+          export TARGET
+          python3 - <<'REGISTRY_ABSENCE_PY'
+          import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          def prove_absence():
+              target = os.environ['TARGET']
+              match = re.fullmatch(r'forgejo\.xtrape\.com/(xtrape-project/(?:xtrape-platform-ce|xtrape-panel-ce|xtrape-exposure|linux-ops-widget-nodejs|forgejo-ops-widget-nodejs)):(candidate-[0-9a-f]{40}-[0-9]+-attempt-[0-9]+)', target)
+              if not match:
+                  return False
+              name, tag = match.groups()
+              # Existing trusted runner LAN plane; no redirect, proxy or TLS bypass.
+              base = 'http://forgejo.docker'
+              opener = urllib.request.build_opener(NoRedirect, urllib.request.ProxyHandler({}))
+              def read(path, token=None):
+                  headers = {'Host': 'forgejo.xtrape.com', 'User-Agent': 'curl/8.0',
+                             'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'}
+                  if token:
+                      headers['Authorization'] = 'Bearer ' + token
+                  req = urllib.request.Request(base + path, headers=headers)
+                  try:
+                      response = opener.open(req, timeout=20)
+                  except urllib.error.HTTPError as error:
+                      response = error
+                  with response:
+                      return response.code, json.loads(response.read(1048576))
+              query = urllib.parse.urlencode({'service': 'container_registry', 'scope': 'repository:' + name + ':pull'})
+              status, data = read('/v2/token?' + query)
+              token = data.get('token') or data.get('access_token')
+              if status != 200 or not isinstance(token, str) or not token:
+                  return False
+              status, data = read('/v2/' + name + '/manifests/' + tag, token)
+              errors = data.get('errors')
+              return status == 404 and isinstance(errors, list) and bool(errors) and all(isinstance(e, dict) and e.get('code') == 'MANIFEST_UNKNOWN' for e in errors)
+          try:
+              absent = prove_absence()
+          except Exception:
+              absent = False
+          print('candidate absence confirmed by Registry protocol' if absent else 'candidate absence not proven; no write attempted')
+          sys.exit(0 if absent else 1)
+          REGISTRY_ABSENCE_PY
           docker tag "$PUBLIC_CANDIDATE_IMAGE" "$TARGET"
           docker push "$TARGET"
           DIGEST="$(docker buildx imagetools inspect "$TARGET" --format '{{json .Manifest.Digest}}' | tr -d '"')"
