@@ -1,5 +1,6 @@
 import base64
 import http.server
+import io
 import json
 import os
 from pathlib import Path
@@ -8,9 +9,34 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
+import urllib.error
 import external_source as p
 
 class Tests(unittest.TestCase):
+    def test_codeberg_username_from_fixed_token_identity_endpoint(self):
+        response=Mock();response.status=200
+        response.read.return_value=b'{"login":"fixture-owner","email":"private-fixture"}'
+        response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
+        opener=Mock();opener.open.return_value=response
+        self.assertEqual(p.codeberg_username('fixture-secret',opener),'fixture-owner')
+        request=opener.open.call_args.args[0]
+        self.assertEqual(request.full_url,'https://codeberg.org/api/v1/user')
+        self.assertEqual(request.get_header('Authorization'),'token fixture-secret')
+        self.assertNotIn('fixture-secret',request.full_url)
+        self.assertEqual(opener.open.call_args.kwargs,{'timeout':15})
+        response.read.assert_called_once_with(1048577)
+        self.assertIsNone(p.NoRedirect().redirect_request(None,None,None,None,None,None))
+    def test_codeberg_identity_errors_are_bounded_and_do_not_leak(self):
+        for code,expected in [(401,'CODEBERG_TOKEN_REJECTED'),(403,'CODEBERG_IDENTITY_SCOPE_REFUSED'),(302,'CODEBERG_IDENTITY_UNCONFIRMED'),(404,'CODEBERG_IDENTITY_UNCONFIRMED')]:
+            opener=Mock();opener.open.side_effect=urllib.error.HTTPError('https://codeberg.org/api/v1/user',code,'fixture-secret',{},io.BytesIO(b'fixture-secret'))
+            with self.assertRaisesRegex(p.Refusal,'^'+expected+'$'):p.codeberg_username('fixture-secret',opener)
+            self.assertEqual(opener.open.call_count,1)
+        for raw in [b'{"login":"secret-value\\n"}',b'[]',b'not json',b'x'*1048577]:
+            response=Mock();response.status=200;response.read.return_value=raw
+            response.__enter__=Mock(return_value=response);response.__exit__=Mock(return_value=False)
+            opener=Mock();opener.open.return_value=response
+            with self.assertRaisesRegex(p.Refusal,'^CODEBERG_IDENTITY_UNCONFIRMED$'):p.codeberg_username('fixture-secret',opener)
     def test_source_origin_bound_to_issuer_and_exact_public_path(self):
         root='http://ci.example.invalid'
         self.assertTrue(p.source_origin_matches(root+'/'+p.REPOSITORY,root))
@@ -66,6 +92,8 @@ class Tests(unittest.TestCase):
         for text,expected in [('garbage','INVALID_REMOTE_REFS'),('a'*40+'\trefs/heads/master','TARGET_NONEMPTY_WITHOUT_MAIN')]:
             with self.assertRaisesRegex(p.Refusal,expected):p.remote_head('https://fixed.invalid',{},lambda *a:text)
     def fixture(self,case):
+        platform='codeberg' if case in ('codeberg','codeberg-explicit') else 'github'
+        target_url=p.TARGETS[platform][0]
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source=root/'source';source.mkdir();bare=root/'target.git'
             def git(*args,cwd=source):return subprocess.check_output(['git',*args],cwd=cwd,text=True,stderr=subprocess.DEVNULL).strip()
@@ -89,8 +117,11 @@ class Tests(unittest.TestCase):
                 calls.append(args)
                 self.assertNotIn('fixture-secret',' '.join(args))
                 self.assertNotIn('--force',args);self.assertNotIn('--mirror',args)
-                mapped=[('file://'+str(bare)) if a==p.TARGETS['github'][0] else a for a in args]
+                mapped=[('file://'+str(bare)) if a==target_url else a for a in args]
                 authenticated=any(env.get('GIT_CONFIG_KEY_'+str(i),'').endswith('.extraHeader') and env.get('GIT_CONFIG_VALUE_'+str(i),'') for i in range(int(env['GIT_CONFIG_COUNT'])))
+                if platform=='codeberg' and authenticated:
+                    values=[env['GIT_CONFIG_VALUE_'+str(i)] for i in range(int(env['GIT_CONFIG_COUNT']))]
+                    self.assertIn('Authorization: Basic '+base64.b64encode(b'fixture-owner:fixture-secret').decode(),values)
                 if case=='private' and args[0]=='ls-remote' and not authenticated:raise p.Refusal('GIT_COMMAND_REJECTED')
                 if args[0]=='push':
                     pushes.append(args)
@@ -99,12 +130,14 @@ class Tests(unittest.TestCase):
                 if args[0]=='push' and case=='uncertain':raise p.Refusal('GIT_COMMAND_UNCONFIRMED')
                 if args[:2]==['rev-parse','HEAD^{tree}'] and cwd and case=='anonymous-mismatch':return '0'*40
                 return output
-            context={'GITHUB_REPOSITORY':p.REPOSITORY,'GITHUB_REF':'refs/heads/main','SOURCE_SHA':sha,'GH_PUBLISH_TOKEN':'fixture-secret'}
+            context={'GITHUB_REPOSITORY':p.REPOSITORY,'GITHUB_REF':'refs/heads/main','SOURCE_SHA':sha,p.TARGETS[platform][1]:'fixture-secret','EXTERNAL_GIT_USERNAME':''}
+            if case=='codeberg-explicit':context['EXTERNAL_GIT_USERNAME']='fixture-owner'
             if case=='ci-alias':
                 context['SOURCE_SERVER_URL']='http://ci.example.invalid'
                 git('remote','set-url','origin',context['SOURCE_SERVER_URL']+'/'+p.REPOSITORY)
-            with patch.dict(os.environ,context):
-                result=p.deliver('github','probe' if case=='probe' else 'publish',run)
+            with patch.dict(os.environ,context), patch.object(p,'codeberg_username',return_value='fixture-owner') as identity:
+                result=p.deliver(platform,'probe' if case=='probe' else 'publish',run)
+                if platform=='codeberg':self.assertEqual(identity.call_count,0 if case=='codeberg-explicit' else 1)
                 if case=='idempotent':
                     result=p.deliver('github','publish',run)
                     self.assertEqual(len(pushes),1)
@@ -128,6 +161,8 @@ class Tests(unittest.TestCase):
                 self.assertNotIn('.env',git('--git-dir',str(bare),'ls-tree','-r','--name-only','main').splitlines())
                 self.assertEqual(len(pushes),1)
     def test_actual_git_delivery(self):self.fixture('success')
+    def test_codeberg_real_git_uses_token_owner_in_transient_auth(self):self.fixture('codeberg')
+    def test_explicit_codeberg_username_does_not_require_identity_scope(self):self.fixture('codeberg-explicit')
     def test_real_git_delivery_with_context_bound_checkout_alias(self):self.fixture('ci-alias')
     def test_fast_forward_of_existing_public_history(self):self.fixture('fast-forward')
     def test_target_must_be_anonymously_readable_before_write(self):self.fixture('private')

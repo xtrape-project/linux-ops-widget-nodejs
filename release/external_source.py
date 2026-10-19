@@ -7,19 +7,54 @@ import re
 import subprocess
 import tempfile
 import urllib.parse
+import urllib.request
+import urllib.error
 from external_preflight import credential_input
 
 REPOSITORY = "xtrape-project/linux-ops-widget-nodejs"
 TARGETS = {
     "github": ("https://github.com/" + REPOSITORY + ".git", "GH_PUBLISH_TOKEN", "x-access-token"),
     "gitlab": ("https://gitlab.com/" + REPOSITORY + ".git", "GITLAB_PUBLISH_TOKEN", "oauth2"),
-    "codeberg": ("https://codeberg.org/" + REPOSITORY + ".git", "CODEBERG_PUBLISH_TOKEN", "x-access-token"),
+    "codeberg": ("https://codeberg.org/" + REPOSITORY + ".git", "CODEBERG_PUBLISH_TOKEN", ""),
     "gitee": ("https://gitee.com/" + REPOSITORY + ".git", "GITEE_PUBLISH_TOKEN", "oauth2"),
 }
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class Refusal(Exception):
     pass
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):
+        return None
+
+def codeberg_username(token, opener=None):
+    # Codeberg documents account-name + token for Git. Resolve only that
+    # account name; never log or persist the returned profile or token.
+    request=urllib.request.Request('https://codeberg.org/api/v1/user',headers={
+        'Authorization':'token '+token,'Accept':'application/json','User-Agent':'xtrape-public-source/0.8.7'})
+    opener=opener or urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+    try:
+        with opener.open(request,timeout=15) as response:
+            if response.status!=200:
+                raise Refusal('CODEBERG_IDENTITY_UNCONFIRMED')
+            raw=response.read(1048577)
+            if len(raw)>1048576:
+                raise Refusal('CODEBERG_IDENTITY_UNCONFIRMED')
+            profile=json.loads(raw)
+            login=profile.get('login') if isinstance(profile,dict) else None
+            if not isinstance(login,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}',login):
+                raise Refusal('CODEBERG_IDENTITY_UNCONFIRMED')
+            return login
+    except urllib.error.HTTPError as error:
+        try:error.close()
+        except Exception:pass
+        if error.code==401:raise Refusal('CODEBERG_TOKEN_REJECTED') from None
+        if error.code==403:raise Refusal('CODEBERG_IDENTITY_SCOPE_REFUSED') from None
+        raise Refusal('CODEBERG_IDENTITY_UNCONFIRMED') from None
+    except Refusal:
+        raise
+    except Exception:
+        raise Refusal('CODEBERG_IDENTITY_UNCONFIRMED') from None
 
 def source_origin_matches(origin, server_url):
     canonical = "https://forgejo.xtrape.com/" + REPOSITORY
@@ -136,7 +171,7 @@ def deliver(platform, mode, run=execute):
         if not token or any(shape[k] for k in ("embedded_control_character","header_wrapper_present","assignment_wrapper_present","quoted_value","placeholder_value")):
             raise Refusal("INVALID_CREDENTIAL_INPUT")
         username = os.environ.get("EXTERNAL_GIT_USERNAME",default_user) or default_user
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}",username):
+        if username and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}",username):
             raise Refusal("INVALID_GIT_USERNAME")
         local_env = git_environment(url)
         if run(["rev-parse", "HEAD"],local_env) != source:
@@ -145,6 +180,9 @@ def deliver(platform, mode, run=execute):
         if not source_origin_matches(origin,os.environ.get("SOURCE_SERVER_URL","")):
             raise Refusal("SOURCE_ORIGIN_REFUSED")
         tree = run(["rev-parse", "HEAD^{tree}"],local_env)
+        if platform=='codeberg' and not username:
+            report['phase']='token_identity'
+            username=codeberg_username(token)
         env = git_environment(url,token,username)
         report["phase"]="target_git_probe"
         old = remote_head(url,env,run)
