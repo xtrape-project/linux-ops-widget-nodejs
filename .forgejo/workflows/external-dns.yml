@@ -1,0 +1,16 @@
+name: Fixed external DNS transport diagnostic
+on:
+  workflow_dispatch:
+jobs:
+  diagnose:
+    if: ${{ github.repository == 'xtrape-project/linux-ops-widget-nodejs' && github.ref == 'refs/heads/main' }}
+    runs-on: docker
+    timeout-minutes: 3
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s release -p test_external_dns.py
+      - run: python3 release/external_dns.py
