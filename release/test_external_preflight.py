@@ -1,6 +1,9 @@
 import io
 import json
 import os
+import errno
+import socket
+import ssl
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -39,5 +42,52 @@ class Tests(unittest.TestCase):
             def open(self,*a,**kw): raise RuntimeError("secret-value")
         with patch.dict(os.environ,{"GH_PUBLISH_TOKEN":"test-only-value"}):
             self.assertEqual(p.probe("github",Opener()),"TRANSPORT_FAILURE")
+    def test_http_status_and_known_service_errors(self):
+        for platform, code, raw, known in [
+            ("github",401,b'{"message":"Bad credentials"}',"BAD_CREDENTIALS"),
+            ("gitlab",401,b'{"message":"401 Unauthorized"}',"UNAUTHORIZED"),
+            ("github",403,b'{"message":"secret-value"}',"UNRECOGNIZED"),
+            ("github",403,b'<html>secret-value</html>',"UNRECOGNIZED"),
+        ]:
+            class Opener:
+                def open(self,req,timeout):
+                    raise urllib.error.HTTPError(req.full_url,code,"secret-value",{},io.BytesIO(raw))
+            with patch.dict(os.environ,{p.TARGETS[platform][1]:"test-only-value"}):
+                result=p.probe_details(platform,Opener())
+            self.assertEqual(result["http_status"],code)
+            self.assertEqual(result["service_error"],known)
+            self.assertEqual(result["result"],"TARGET_ACCESS_REJECTED")
+            self.assertNotIn("secret-value",json.dumps(result))
+    def test_transport_causes_without_exception_text(self):
+        for reason,expected in [
+            (ssl.SSLCertVerificationError(1,"secret-value"),"TLS_CERTIFICATE_VERIFICATION_FAILED"),
+            (ssl.SSLError(1,"secret-value"),"TLS_FAILURE"),
+            (socket.gaierror(-2,"secret-value"),"DNS_FAILURE"),
+            (TimeoutError("secret-value"),"TIMEOUT"),
+            (ConnectionRefusedError("secret-value"),"CONNECTION_REFUSED"),
+            (ConnectionResetError("secret-value"),"CONNECTION_RESET"),
+            (OSError(errno.ENETUNREACH,"secret-value"),"NETWORK_UNREACHABLE"),
+            (RuntimeError("secret-value"),"UNCLASSIFIED_TRANSPORT_FAILURE"),
+        ]:
+            class Opener:
+                def open(self,*a,**kw): raise urllib.error.URLError(reason)
+            with patch.dict(os.environ,{"GH_PUBLISH_TOKEN":"test-only-value"}):
+                result=p.probe_details("github",Opener())
+            self.assertEqual(result["transport_category"],expected)
+            self.assertNotIn("secret-value",json.dumps(result))
+    def test_no_error_body_echo_or_unbounded_error_read(self):
+        for raw in [b'{"message":"secret-value"}',b'x'*1048577,b'[]']:
+            class Opener:
+                def open(self,req,timeout):
+                    raise urllib.error.HTTPError(req.full_url,401,"secret-value",{},io.BytesIO(raw))
+            with patch.dict(os.environ,{"GH_PUBLISH_TOKEN":"test-only-value"}):
+                result=p.probe_details("github",Opener())
+            self.assertEqual(result["service_error"],"UNRECOGNIZED")
+            self.assertNotIn("secret-value",json.dumps(result))
+    def test_cli_only_safe_structured_output(self):
+        with patch.dict(os.environ,{"TARGET_PLATFORM":"github","GH_PUBLISH_TOKEN":"secret-value"}), patch.object(p,"probe_details",return_value={"platform":"github","result":"TRANSPORT_FAILURE","transport_category":"TIMEOUT","writes_attempted":0}), patch("sys.stdout",new_callable=io.StringIO) as output:
+            self.assertEqual(p.main(),1)
+            self.assertEqual(json.loads(output.getvalue())["transport_category"],"TIMEOUT")
+            self.assertNotIn("secret-value",output.getvalue())
 
 if __name__ == "__main__": unittest.main()
