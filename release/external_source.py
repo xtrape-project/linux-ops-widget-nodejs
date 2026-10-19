@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import urllib.parse
 from external_preflight import credential_input
 
 REPOSITORY = "xtrape-project/linux-ops-widget-nodejs"
@@ -19,6 +20,40 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class Refusal(Exception):
     pass
+
+def source_origin_matches(origin, server_url):
+    canonical = "https://forgejo.xtrape.com/" + REPOSITORY
+    if origin in (canonical,canonical+".git"):
+        return True
+    # The workflow supplies its issuer URL from trusted github.server_url,
+    # never a dispatch input. Internal checkout transport can differ from the
+    # public canonical. This is an identity check, not an HTTP fetch.
+    try:
+        if any(ord(c)<33 or ord(c)>126 for c in server_url+origin) or any(c in server_url+origin for c in "?#"):
+            return False
+        root = urllib.parse.urlsplit(server_url)
+        candidate = urllib.parse.urlsplit(origin)
+        if root.scheme not in ("http","https") or not root.hostname or root.username is not None or root.password is not None or root.query or root.fragment or root.path not in ("","/"):
+            return False
+        if candidate.username is not None or candidate.password is not None:
+            return False
+        _ = root.port, candidate.port  # malformed ports fail closed
+        return candidate.scheme==root.scheme and candidate.netloc==root.netloc and candidate.path in ("/"+REPOSITORY,"/"+REPOSITORY+".git")
+    except ValueError:
+        return False
+
+def git_failure(stderr):
+    value=stderr.lower()
+    if "could not resolve host" in value or "could not resolve hostname" in value:
+        return "GIT_DNS_FAILURE"
+    if "ssl certificate problem" in value:
+        return "GIT_TLS_FAILURE"
+    if "authentication failed" in value or "http basic: access denied" in value:
+        return "GIT_AUTHENTICATION_REJECTED"
+    if "repository not found" in value or "repository" in value and "not found" in value:
+        return "GIT_NOT_FOUND_OR_NOT_VISIBLE"
+    match=re.search(r"returned error: (401|403|404|429|5[0-9]{2})\b",value)
+    return "GIT_HTTP_"+match[1] if match else "GIT_COMMAND_REJECTED"
 
 def git_environment(url, token=None, username=None):
     secret_keys = {v[1] for v in TARGETS.values()} | {"PUBLISH_TOKEN", "REGISTRY_TOKEN", "GITHUB_TOKEN"}
@@ -41,7 +76,7 @@ def execute(args, env, cwd=None):
         raise Refusal("GIT_COMMAND_UNCONFIRMED") from None
     if p.returncode:
         # Never print errors: Git can include an authentication value in them.
-        raise Refusal("GIT_COMMAND_REJECTED")
+        raise Refusal(git_failure(p.stderr))
     if len(p.stdout) > 1048576:
         raise Refusal("GIT_RESPONSE_TOO_LARGE")
     return p.stdout.strip()
@@ -89,7 +124,7 @@ def deliver(platform, mode, run=execute):
         if run(["rev-parse", "HEAD"],local_env) != source:
             raise Refusal("CHECKOUT_SOURCE_MISMATCH")
         origin = run(["remote","get-url","origin"],local_env)
-        if origin not in ("https://forgejo.xtrape.com/"+REPOSITORY, "https://forgejo.xtrape.com/"+REPOSITORY+".git"):
+        if not source_origin_matches(origin,os.environ.get("SOURCE_SERVER_URL","")):
             raise Refusal("SOURCE_ORIGIN_REFUSED")
         tree = run(["rev-parse", "HEAD^{tree}"],local_env)
         env = git_environment(url,token,username)
