@@ -93,11 +93,15 @@ def sha(raw):
 def validate_image(manifest, registry, token, source, repository):
     if manifest.get('schemaVersion') != 2 or manifest.get('mediaType') not in MEDIA:
         raise Refusal('unsupported image manifest')
-    config_digest = manifest.get('config', {}).get('digest', '')
+    config_descriptor = manifest.get('config', {})
+    config_digest = config_descriptor.get('digest', '')
+    config_size = config_descriptor.get('size')
+    if type(config_size) is not int or config_size <= 0:
+        raise Refusal('invalid config size')
     if not re.fullmatch('sha256:[0-9a-f]{64}', config_digest):
         raise Refusal('invalid config digest')
     raw = registry.blob(config_digest, token)
-    if sha(raw) != config_digest:
+    if sha(raw) != config_digest or len(raw) != config_size:
         raise Refusal('config blob integrity failure')
     labels = json.loads(raw).get('config', {}).get('Labels', {})
     if (labels.get('org.opencontainers.image.revision') != source or

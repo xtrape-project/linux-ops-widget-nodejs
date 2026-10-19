@@ -7,7 +7,7 @@ class Fake:
     def __init__(self):
         self.source='a'*40
         self.config=json.dumps({'config':{'Labels':{'org.opencontainers.image.revision':self.source,'org.opencontainers.image.version':'0.8.7','org.opencontainers.image.source':'https://forgejo.xtrape.com/xtrape-project/xtrape-platform-ce'}}}).encode()
-        self.raw=json.dumps({'schemaVersion':2,'mediaType':p.MEDIA[0],'config':{'digest':p.sha(self.config)},'layers':[]}).encode()
+        self.raw=json.dumps({'schemaVersion':2,'mediaType':p.MEDIA[0],'config':{'digest':p.sha(self.config),'size':len(self.config)},'layers':[]}).encode()
         self.record={'repo':'xtrape-platform-ce','public_source_sha':self.source,'run_id':1,'public_digest':p.sha(self.raw)}
         self.refs={'candidate-'+self.source+'-1-attempt-1':self.raw,p.sha(self.raw):self.raw}
         self.writes=[]
@@ -44,6 +44,16 @@ class Tests(unittest.TestCase):
     def test_index_refused(self):
         f=Fake();f.raw=json.dumps({'schemaVersion':2,'mediaType':'application/vnd.oci.image.index.v1+json'}).encode();f.record['public_digest']=p.sha(f.raw);f.refs={k:f.raw for k in f.refs};f.refs[p.sha(f.raw)]=f.raw
         with self.assertRaises(p.Refusal):self.run_promotion(f)
+    def test_config_size_rejected_before_write(self):
+        for size in [None, 0, -1, True, '12', 1]:
+            with self.subTest(size=size):
+                f=Fake(); doc=json.loads(f.raw)
+                if size is None:del doc['config']['size']
+                else:doc['config']['size']=size
+                f.raw=json.dumps(doc).encode();f.record['public_digest']=p.sha(f.raw)
+                f.refs['candidate-'+f.source+'-1-attempt-1']=f.raw;f.refs[p.sha(f.raw)]=f.raw
+                with self.assertRaises(p.Refusal):self.run_promotion(f)
+                self.assertEqual(f.writes,[])
     def test_positive_absence_only(self):
         r=p.Registry('xtrape-project/xtrape-platform-ce')
         for status,body,absent in [(404,{'errors':[{'code':'MANIFEST_UNKNOWN'}]},True),(404,{'errors':[]},False),(404,{'errors':[{'code':'MANIFEST_UNKNOWN'},{'code':'DENIED'}]},False),(403,{'errors':[{'code':'MANIFEST_UNKNOWN'}]},False),(500,{},False),(302,{},False)]:
@@ -88,6 +98,15 @@ class IndexTests(unittest.TestCase):
     def test_index_preserved_exactly(self):
         f,index=self.index_fixture();self.run_promotion(f)
         self.assertEqual(f.refs['0.8.7'],f.raw);self.assertEqual(len(f.writes),2)
+    def test_index_image_config_size_rejected_before_write(self):
+        f,index=self.index_fixture();descriptor=index['manifests'][0]
+        image=json.loads(f.refs[descriptor['digest']]);image['config']['size']+=1
+        raw=json.dumps(image).encode();descriptor['digest']=p.sha(raw);descriptor['size']=len(raw)
+        f.refs[descriptor['digest']]=raw
+        index['manifests'][1]['annotations']['vnd.docker.reference.digest']=descriptor['digest']
+        self.set_index(f,index)
+        with self.assertRaises(p.Refusal):self.run_promotion(f)
+        self.assertEqual(f.writes,[])
     def test_index_bad_shapes(self):
         for mode in ['empty','extra','platform','binding','size','missing','corrupt','media','proof']:
             with self.subTest(mode=mode):
