@@ -11,6 +11,7 @@ from pathlib import Path
 
 MEDIA = ('application/vnd.oci.image.manifest.v1+json',
          'application/vnd.docker.distribution.manifest.v2+json')
+INDEX = 'application/vnd.oci.image.index.v1+json'
 REPOS = {'xtrape-platform-ce', 'xtrape-panel-ce', 'xtrape-exposure',
          'linux-ops-widget-nodejs', 'forgejo-ops-widget-nodejs'}
 
@@ -28,7 +29,7 @@ class Registry:
 
     def request(self, path, bearer=None, data=None, media=None, basic=None):
         headers = {'Host': 'forgejo.xtrape.com', 'User-Agent': 'curl/8.0',
-                   'Accept': ', '.join(MEDIA)}
+                   'Accept': ', '.join((*MEDIA, INDEX))}
         if bearer:
             headers['Authorization'] = 'Bearer ' + bearer
         if basic:
@@ -89,6 +90,76 @@ class Registry:
 def sha(raw):
     return 'sha256:' + hashlib.sha256(raw).hexdigest()
 
+def validate_image(manifest, registry, token, source, repository):
+    if manifest.get('schemaVersion') != 2 or manifest.get('mediaType') not in MEDIA:
+        raise Refusal('unsupported image manifest')
+    config_descriptor = manifest.get('config', {})
+    config_digest = config_descriptor.get('digest', '')
+    config_size = config_descriptor.get('size')
+    if type(config_size) is not int or config_size <= 0:
+        raise Refusal('invalid config size')
+    if not re.fullmatch('sha256:[0-9a-f]{64}', config_digest):
+        raise Refusal('invalid config digest')
+    raw = registry.blob(config_digest, token)
+    if sha(raw) != config_digest or len(raw) != config_size:
+        raise Refusal('config blob integrity failure')
+    labels = json.loads(raw).get('config', {}).get('Labels', {})
+    if (labels.get('org.opencontainers.image.revision') != source or
+        labels.get('org.opencontainers.image.version') != '0.8.7' or
+        labels.get('org.opencontainers.image.source') != 'https://forgejo.xtrape.com/' + repository):
+        raise Refusal('source/version labels mismatch')
+
+
+def validate_candidate(manifest, registry, token, source, repository):
+    if manifest.get('schemaVersion') != 2:
+        raise Refusal('unsupported manifest schema')
+    if manifest.get('mediaType') in MEDIA:
+        return validate_image(manifest, registry, token, source, repository)
+    if manifest.get('mediaType') != INDEX:
+        raise Refusal('unsupported manifest; no conversion allowed')
+    # Accepted buildx shape: one linux/amd64 image and its provenance manifest.
+    # Preserve the whole index bytes and both children, never flatten or rebuild.
+    children = manifest.get('manifests')
+    if not isinstance(children, list) or len(children) != 2:
+        raise Refusal('unsupported index shape')
+    images = [d for d in children if d.get('platform') == {'os': 'linux', 'architecture': 'amd64'}]
+    attestations = [d for d in children if d.get('platform') == {'os': 'unknown', 'architecture': 'unknown'}]
+    if len(images) != 1 or len(attestations) != 1:
+        raise Refusal('unsupported index platforms')
+    image, attestation = images[0], attestations[0]
+    annotations = attestation.get('annotations', {})
+    if (annotations.get('vnd.docker.reference.type') != 'attestation-manifest' or
+        annotations.get('vnd.docker.reference.digest') != image.get('digest')):
+        raise Refusal('attestation image binding mismatch')
+    for descriptor in children:
+        digest = descriptor.get('digest', '')
+        if (descriptor.get('mediaType') != MEDIA[0] or
+            not re.fullmatch('sha256:[0-9a-f]{64}', digest) or
+            type(descriptor.get('size')) is not int or descriptor['size'] <= 0):
+            raise Refusal('invalid index descriptor')
+        raw = registry.manifest(digest, token)
+        if raw is None or sha(raw) != digest or len(raw) != descriptor['size']:
+            raise Refusal('index child integrity failure')
+        child = json.loads(raw)
+        if child.get('schemaVersion') != 2 or child.get('mediaType') != descriptor['mediaType']:
+            raise Refusal('index child media mismatch')
+        if descriptor is image:
+            validate_image(child, registry, token, source, repository)
+        else:
+            # Validate referenced proof/config bytes without treating provenance
+            # as a runnable image or requiring product labels on its config.
+            blobs = [child.get('config', {})] + child.get('layers', [])
+            if len(blobs) < 2:
+                raise Refusal('empty attestation')
+            for blob in blobs:
+                digest = blob.get('digest', '')
+                if not re.fullmatch('sha256:[0-9a-f]{64}', digest) or type(blob.get('size')) is not int:
+                    raise Refusal('invalid attestation blob descriptor')
+                content = registry.blob(digest, token)
+                if sha(content) != digest or len(content) != blob['size']:
+                    raise Refusal('attestation blob integrity failure')
+
+
 def promote(record, repository, registry):
     if repository != 'xtrape-project/' + record['repo'] or record['repo'] not in REPOS:
         raise Refusal('repository mismatch')
@@ -105,17 +176,7 @@ def promote(record, repository, registry):
         raise Refusal('accepted candidate digest mismatch')
     manifest = json.loads(raw)
     media = manifest.get('mediaType')
-    if manifest.get('schemaVersion') != 2 or media not in MEDIA:
-        raise Refusal('unsupported manifest; no conversion allowed')
-    config_digest = manifest['config']['digest']
-    if not re.fullmatch('sha256:[0-9a-f]{64}', config_digest):
-        raise Refusal('invalid config digest')
-    config = json.loads(registry.blob(config_digest, anonymous))
-    labels = config.get('config', {}).get('Labels', {})
-    if (labels.get('org.opencontainers.image.revision') != source or
-        labels.get('org.opencontainers.image.version') != '0.8.7' or
-        labels.get('org.opencontainers.image.source') != 'https://forgejo.xtrape.com/' + repository):
-        raise Refusal('source/version labels mismatch')
+    validate_candidate(manifest, registry, anonymous, source, repository)
     targets = ['0.8.7', 'sha-' + source]
     for tag in targets:
         old = registry.manifest(tag, anonymous)
