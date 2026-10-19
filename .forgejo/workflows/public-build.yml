@@ -31,6 +31,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          # Match product CI: enable its bounded test-worker configuration.
+          export CI=true
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git merge-base --is-ancestor "$SOURCE_SHA" origin/main
@@ -41,7 +43,12 @@ jobs:
           pnpm install --frozen-lockfile
           for gate in lint typecheck build test; do
             if node -e 'process.exit(JSON.parse(require("fs").readFileSync("package.json")).scripts?.[process.argv[1]] ? 0 : 1)' "$gate"; then
-              pnpm "$gate"
+              # Linux filesystem-heavy tests share a loaded runner; serialize workers.
+              if [ "$gate" = test ] && node -e 'process.exit(require("./package.json").name === "@xtrape/linux-ops-widget" ? 0 : 1)'; then
+                pnpm "$gate" --maxWorkers=1 --minWorkers=1
+              else
+                pnpm "$gate"
+              fi
             fi
           done
   build:

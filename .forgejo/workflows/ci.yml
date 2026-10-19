@@ -43,7 +43,7 @@ jobs:
         # set it here explicitly rather than relying on the runner's ambient env.
         env:
           CI: 'true'
-        run: pnpm test
+        run: pnpm test --maxWorkers=1 --minWorkers=1
 
   dependency-audit:
     runs-on: docker
